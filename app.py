@@ -1,7 +1,7 @@
 
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3, os, math
+import sqlite3, os, math, unicodedata, re
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -15,6 +15,13 @@ ALT_REQUIRED=["ALM","Ubicación","Material","Denominación material","UPC","TEOR
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
 def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def norm_header(v):
+    s="" if v is None else str(v)
+    s=" ".join(s.replace("\n"," ").replace("\r"," ").split()).strip().upper()
+    s="".join(c for c in unicodedata.normalize("NFD",s) if unicodedata.category(c)!="Mn")
+    return s
+
 def init():
     c=conn(); q=c.cursor()
     q.executescript("""
@@ -138,86 +145,159 @@ def upload(pid):
     if not sup(): return redirect("/")
     if request.method=="POST":
         f=request.files.get("file")
-        if not f: flash("Selecciona un Excel"); return redirect(request.url)
+        if not f:
+            flash("Selecciona un Excel")
+            return redirect(request.url)
+
         try:
-            raw = pd.read_excel(f, header=None)
-            header_row = None
-            template = None
-            for i in range(min(15, len(raw))):
-                vals = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[i].tolist()]
-                if all(col in vals for col in REQUIRED):
-                    header_row=i; template="ticso"; break
-                if all(col in vals for col in ALT_REQUIRED):
-                    header_row=i; template="cemaco"; break
-            if header_row is None:
-                flash("No se reconoció la plantilla. Usa la plantilla TICSO o la plantilla CEMACO con ALM, Ubicación, Material, Denominación material, UPC, TEORICO, Valor unitario y DEPARTAMENTO.")
-                return redirect(request.url)
-            f.seek(0)
-            df=pd.read_excel(f, header=header_row)
-            df.columns=[str(c).strip() for c in df.columns]
+            raw = pd.read_excel(f, header=None, dtype=object)
         except Exception:
             flash("No se pudo leer el Excel. Verifica que sea un archivo .xlsx válido.")
             return redirect(request.url)
 
+        # Nombres aceptados. Se ignoran mayúsculas, tildes y espacios extra.
+        aliases = {
+            "ALM":"ALM",
+            "UBICACION":"Ubicación",
+            "MATERIAL":"Material",
+            "DENOMINACION MATERIAL":"Denominación material",
+            "UPC":"UPC",
+            "TEORICO":"TEORICO",
+            "VALOR UNITARIO":"Valor unitario",
+            "DEPARTAMENTO":"DEPARTAMENTO",
+            "DEPTO":"DEPARTAMENTO",
+            "EMBARQUE":"Embarque",
+            "CODIGO":"Código",
+            "DESCRIPCION":"Descripción",
+            "PRECIO":"Precio",
+            "COSTO":"Costo"
+        }
+
+        header_row=None
+        template=None
+        normalized_headers=None
+
+        for i in range(min(25, len(raw))):
+            vals=[norm_header(v) for v in raw.iloc[i].tolist()]
+            mapped=[aliases.get(v,v) for v in vals]
+
+            cemaco_needed={"ALM","Ubicación","Material","Denominación material","UPC","TEORICO","Valor unitario","DEPARTAMENTO"}
+            ticso_needed={"Embarque","Código","Descripción","Ubicación","Teórico","Precio","Costo"}
+
+            mapped_set=set(mapped)
+            # TEORICO normalizado para plantilla TICSO también.
+            if "TEORICO" in mapped_set:
+                mapped_set.add("Teórico")
+
+            if cemaco_needed.issubset(mapped_set):
+                header_row=i; template="cemaco"; normalized_headers=mapped; break
+            if ticso_needed.issubset(mapped_set):
+                header_row=i; template="ticso"; normalized_headers=mapped; break
+
+        if header_row is None:
+            # Muestra al usuario qué encabezados detectamos en las primeras filas.
+            detected=[]
+            for i in range(min(10,len(raw))):
+                vals=[norm_header(v) for v in raw.iloc[i].tolist() if pd.notna(v)]
+                if vals: detected.append(" | ".join(vals[:12]))
+            preview=" / ".join(detected[:3])
+            flash("No se reconoció la plantilla. Encabezados detectados: "+(preview or "ninguno"))
+            return redirect(request.url)
+
+        f.seek(0)
+        df=pd.read_excel(f, header=header_row, dtype=object)
+
+        # Renombra encabezados usando aliases normalizados.
+        rename_map={}
+        for c in df.columns:
+            n=norm_header(c)
+            mapped=aliases.get(n,n)
+            if mapped=="TEORICO" and template=="ticso":
+                mapped="Teórico"
+            rename_map[c]=mapped
+        df=df.rename(columns=rename_map)
+
         rows=[]; errors=[]; seen=set()
+
         if template=="ticso":
-            missing=[x for x in REQUIRED if x not in df.columns]
-            if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
-            for idx,r in df[REQUIRED].iterrows():
+            needed=["Embarque","Código","Descripción","Ubicación","Teórico","Precio","Costo"]
+            missing=[x for x in needed if x not in df.columns]
+            if missing:
+                flash("Faltan columnas: "+", ".join(missing))
+                return redirect(request.url)
+
+            for idx,r in df[needed].iterrows():
                 ship="" if pd.isna(r["Embarque"]) else str(r["Embarque"]).strip()
                 code="" if pd.isna(r["Código"]) else str(r["Código"]).strip()
                 if not ship or not code or pd.isna(r["Teórico"]) or (ship,code) in seen:
                     errors.append(idx+header_row+2); continue
                 seen.add((ship,code))
-                rows.append((
-                    pid,ship,code,
-                    str(r["Descripción"]) if pd.notna(r["Descripción"]) else "",
-                    str(r["Ubicación"]) if pd.notna(r["Ubicación"]) else "",
-                    float(r["Teórico"]),
-                    None if pd.isna(r["Precio"]) else float(r["Precio"]),
-                    None if pd.isna(r["Costo"]) else float(r["Costo"]),
-                    "",""
-                ))
+                try:
+                    theo=float(r["Teórico"])
+                    price=None if pd.isna(r["Precio"]) else float(r["Precio"])
+                    cost=None if pd.isna(r["Costo"]) else float(r["Costo"])
+                except Exception:
+                    errors.append(idx+header_row+2); continue
+                rows.append((pid,ship,code,
+                    "" if pd.isna(r["Descripción"]) else str(r["Descripción"]).strip(),
+                    "" if pd.isna(r["Ubicación"]) else str(r["Ubicación"]).strip(),
+                    theo,price,cost,"",""))
+
         else:
-            missing=[x for x in ALT_REQUIRED if x not in df.columns]
-            if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
-            for idx,r in df[ALT_REQUIRED].iterrows():
+            needed=["ALM","Ubicación","Material","Denominación material","UPC","TEORICO","Valor unitario","DEPARTAMENTO"]
+            missing=[x for x in needed if x not in df.columns]
+            if missing:
+                flash("Faltan columnas: "+", ".join(missing))
+                return redirect(request.url)
+
+            for idx,r in df[needed].iterrows():
                 alm="" if pd.isna(r["ALM"]) else str(r["ALM"]).strip()
                 code="" if pd.isna(r["Material"]) else str(r["Material"]).strip()
                 location="" if pd.isna(r["Ubicación"]) else str(r["Ubicación"]).strip()
-                if not alm or not code or pd.isna(r["TEORICO"]) or (alm,location,code) in seen:
+
+                # Se permite el mismo material repetido si cambia la ubicación.
+                key=(alm,location,code)
+                if not alm or not code or pd.isna(r["TEORICO"]) or key in seen:
                     errors.append(idx+header_row+2); continue
-                seen.add((alm,location,code))
+                seen.add(key)
+
+                try:
+                    theo=float(r["TEORICO"])
+                    cost=None if pd.isna(r["Valor unitario"]) else float(r["Valor unitario"])
+                except Exception:
+                    errors.append(idx+header_row+2); continue
+
                 upc="" if pd.isna(r["UPC"]) else str(r["UPC"]).strip()
                 dept="" if pd.isna(r["DEPARTAMENTO"]) else str(r["DEPARTAMENTO"]).strip()
-                rows.append((
-                    pid,alm,code,
-                    str(r["Denominación material"]) if pd.notna(r["Denominación material"]) else "",
-                    location,
-                    float(r["TEORICO"]),
-                    None,
-                    None if pd.isna(r["Valor unitario"]) else float(r["Valor unitario"]),
-                    upc,dept
-                ))
+
+                rows.append((pid,alm,code,
+                    "" if pd.isna(r["Denominación material"]) else str(r["Denominación material"]).strip(),
+                    location,theo,None,cost,upc,dept))
 
         if errors:
-            flash("Hay errores críticos en filas: "+", ".join(map(str,errors[:20])))
+            flash("Hay filas con datos inválidos o duplicados. Revisa estas filas: "+", ".join(map(str,errors[:20])))
             return redirect(request.url)
 
-        c=conn(); c.execute("DELETE FROM items WHERE project_id=?",(pid,))
+        if not rows:
+            flash("La plantilla fue reconocida, pero no se encontraron registros para cargar.")
+            return redirect(request.url)
+
+        c=conn()
+        c.execute("DELETE FROM items WHERE project_id=?",(pid,))
         c.executemany("""INSERT INTO items(project_id,shipment,code,description,location,theoretical,price,cost,upc,department)
                          VALUES(?,?,?,?,?,?,?,?,?,?)""",rows)
         c.commit(); c.close()
+
         tipo="Plantilla CEMACO" if template=="cemaco" else "Plantilla TICSO"
         flash(f"{tipo} cargada correctamente: {len(rows)} registros")
         return redirect(f"/count?project_id={pid}")
 
     return page("Cargar Excel",f"""<h1>Cargar Excel</h1>
     <div class='card'>
-      <p><b>Ahora puedes cargar cualquiera de estos formatos:</b></p>
-      <p>Plantilla TICSO: Embarque, Código, Descripción, Ubicación, Teórico, Precio, Costo</p>
-      <p>Plantilla CEMACO: ALM, Ubicación, Material, Denominación material, UPC, TEORICO, Valor unitario, DEPARTAMENTO</p>
-      <p>En la plantilla CEMACO, <b>ALM se usa como filtro de almacén</b> y <b>Valor unitario se toma como Costo</b>.</p>
+      <p><b>Formatos aceptados:</b></p>
+      <p>Plantilla CEMACO: ALM, Ubicación, Material, Denominación material, UPC, TEORICO, Valor unitario, DEPARTAMENTO.</p>
+      <p>También se acepta <b>DEPTO</b> como equivalente de DEPARTAMENTO y se ignoran tildes, mayúsculas y espacios extra.</p>
+      <p><b>Valor unitario se toma como Costo.</b></p>
       <form method='post' enctype='multipart/form-data'>
         <input type='file' name='file' accept='.xlsx,.xls' required>
         <button class='btn blue'>Validar y cargar</button>
