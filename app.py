@@ -134,8 +134,24 @@ def upload(pid):
     if request.method=="POST":
         f=request.files.get("file")
         if not f: flash("Selecciona un Excel"); return redirect(request.url)
-        try: df=pd.read_excel(f)
-        except Exception as e: flash("No se pudo leer el Excel"); return redirect(request.url)
+        try:
+            # Detecta automáticamente la fila de encabezados dentro de las primeras 10 filas.
+            raw = pd.read_excel(f, header=None)
+            header_row = None
+            for i in range(min(10, len(raw))):
+                vals = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[i].tolist()]
+                if all(col in vals for col in REQUIRED):
+                    header_row = i
+                    break
+            if header_row is None:
+                flash("No se encontraron los encabezados requeridos. Deben aparecer: "+", ".join(REQUIRED))
+                return redirect(request.url)
+            f.seek(0)
+            df = pd.read_excel(f, header=header_row)
+            df.columns = [str(c).strip() for c in df.columns]
+        except Exception:
+            flash("No se pudo leer el Excel. Verifica que sea un archivo .xlsx válido.")
+            return redirect(request.url)
         missing=[x for x in REQUIRED if x not in df.columns]
         if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
         errors=[]; rows=[]; seen=set()
