@@ -192,13 +192,33 @@ def count():
         <td><input id='l{r['id']}' type='checkbox' {'checked' if r['location_ok']==1 else ''} {disabled} onchange='save({r["id"]})'></td>{diff}<td id='s{r["id"]}'>{r["status"]}</td></tr>"""
     heads="<th>Teórico</th>" if u["role"]=="supervisor" else ""; dh="<th>Diferencia</th>" if u["role"]=="supervisor" else ""
     manual = f"""<button type='button' class='btn light' onclick="document.getElementById('m').style.display='block'">+ Ingresar código manual</button>
-    <div id='m' class='card' style='display:none;margin-top:12px'><div class='row'><input id='mc' placeholder='Código'><input id='md' placeholder='Descripción'><input id='ml' placeholder='Ubicación'><input id='mq' type='number' placeholder='Cantidad física'><button type='button' class='btn green' onclick='manual()'>Agregar sobrante</button></div></div>""" if ship else ""
+    <div id='m' class='card' style='display:none;margin-top:12px'>
+      <h3>Ingresar código manual</h3>
+      <div class='row'>
+        <input id='ms' placeholder='Embarque' value='{ship or ""}'>
+        <input id='mc' placeholder='Código'>
+        <input id='md' placeholder='Descripción'>
+        <input id='ml' placeholder='Ubicación'>
+        <input id='mq' type='number' placeholder='Cantidad física'>
+        <button type='button' class='btn green' onclick='manual()'>Agregar código</button>
+      </div>
+    </div>""" if pid else ""
     return page("Conteo",f"""<h1>Conteo físico</h1><div class='card'><form method='get'><input type='hidden' name='project_id' value='{pid or ""}'><select name='shipment' onchange='this.form.submit()'>{opts}</select> {manual}</form></div>
     <div class='card'><table><tr><th>Código</th><th>Descripción</th><th>Ubicación</th>{heads}<th>Físico</th><th>Ubicación correcta</th>{dh}<th>Estado</th></tr>{trs}</table></div>
     <script>
     async function lock(id,e){{let r=await fetch('/api/lock/'+id,{{method:'POST'}});let d=await r.json();if(!d.ok){{e.blur();alert('Bloqueado por '+d.by)}}}}
     async function save(id){{let p=document.getElementById('p'+id).value;if(p==='')return;let l=document.getElementById('l'+id).checked;let r=await fetch('/api/count/'+id,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{physical:p,location_ok:l}})}});let d=await r.json();if(d.ok){{let s=document.getElementById('s'+id);s.innerText=d.status;let x=document.getElementById('d'+id);if(x)x.innerText=d.diff;}}}}
-    async function manual(){{let r=await fetch('/api/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{project_id:{pid or 0},shipment:{repr(ship or "")},code:mc.value,description:md.value,location:ml.value,physical:mq.value}})}});let d=await r.json();if(d.ok)location.reload();else alert(d.message);}}
+    async function manual(){{
+      let shipment=document.getElementById('ms').value.trim();
+      let code=document.getElementById('mc').value.trim();
+      let qty=document.getElementById('mq').value;
+      if(!shipment){{alert('Ingresa el embarque');return;}}
+      if(!code){{alert('Ingresa el código');return;}}
+      if(qty===''){{alert('Ingresa la cantidad física');return;}}
+      let r=await fetch('/api/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{project_id:{pid or 0},shipment:shipment,code:code,description:md.value,location:ml.value,physical:qty}})}});
+      let d=await r.json();
+      if(d.ok)location.href='/count?project_id={pid or 0}&shipment='+encodeURIComponent(shipment);else alert(d.message);
+    }}
     </script>""")
 
 @app.route("/api/lock/<int:i>",methods=["POST"])
