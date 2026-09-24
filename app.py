@@ -10,6 +10,7 @@ app.secret_key = os.environ.get("SECRET_KEY","ticso-demo-secret")
 DB="ticso.db"
 ORIGINS=["ATLAS","NODUS","CARGA GLOBAL","FORZA"]
 REQUIRED=["Embarque","Código","Descripción","Ubicación","Teórico","Precio","Costo"]
+ALT_REQUIRED=["ALM","Ubicación","Material","Denominación material","UPC","TEORICO","Valor unitario","DEPARTAMENTO"]
 
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
@@ -19,7 +20,7 @@ def init():
     q.executescript("""
     CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,name TEXT,role TEXT,password_hash TEXT);
     CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY,name TEXT,client TEXT,origin TEXT,destination TEXT,created_at TEXT);
-    CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,project_id INTEGER,shipment TEXT,code TEXT,description TEXT,location TEXT,theoretical REAL,price REAL,cost REAL,physical REAL,location_ok INTEGER,status TEXT DEFAULT 'Pendiente',is_manual INTEGER DEFAULT 0,updated_at TEXT);
+    CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,project_id INTEGER,shipment TEXT,code TEXT,description TEXT,location TEXT,theoretical REAL,price REAL,cost REAL,upc TEXT,department TEXT,physical REAL,location_ok INTEGER,status TEXT DEFAULT 'Pendiente',is_manual INTEGER DEFAULT 0,updated_at TEXT);
     CREATE TABLE IF NOT EXISTS recounts(id INTEGER PRIMARY KEY,item_id INTEGER,assigned_to INTEGER,count_no INTEGER DEFAULT 2,quantity REAL,status TEXT DEFAULT 'Pendiente',created_at TEXT,completed_at TEXT);
     CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,item_id INTEGER,user_id INTEGER,action TEXT,old_value TEXT,new_value TEXT,created_at TEXT);
     CREATE TABLE IF NOT EXISTS locks(item_id INTEGER PRIMARY KEY,user_id INTEGER,expires_at TEXT);
@@ -27,6 +28,10 @@ def init():
     for u,n,r in [("supervisor","Supervisor TICSO","supervisor"),("auxiliar","Auxiliar TICSO","auxiliar")]:
         if not q.execute("SELECT 1 FROM users WHERE username=?",(u,)).fetchone():
             q.execute("INSERT INTO users(username,name,role,password_hash) VALUES(?,?,?,?)",(u,n,r,generate_password_hash("ticso123")))
+    # Migraciones simples para bases ya creadas.
+    cols=[r["name"] for r in q.execute("PRAGMA table_info(items)").fetchall()]
+    if "upc" not in cols: q.execute("ALTER TABLE items ADD COLUMN upc TEXT")
+    if "department" not in cols: q.execute("ALTER TABLE items ADD COLUMN department TEXT")
     c.commit(); c.close()
 init()
 
@@ -135,37 +140,89 @@ def upload(pid):
         f=request.files.get("file")
         if not f: flash("Selecciona un Excel"); return redirect(request.url)
         try:
-            # Detecta automáticamente la fila de encabezados dentro de las primeras 10 filas.
             raw = pd.read_excel(f, header=None)
             header_row = None
-            for i in range(min(10, len(raw))):
+            template = None
+            for i in range(min(15, len(raw))):
                 vals = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[i].tolist()]
                 if all(col in vals for col in REQUIRED):
-                    header_row = i
-                    break
+                    header_row=i; template="ticso"; break
+                if all(col in vals for col in ALT_REQUIRED):
+                    header_row=i; template="cemaco"; break
             if header_row is None:
-                flash("No se encontraron los encabezados requeridos. Deben aparecer: "+", ".join(REQUIRED))
+                flash("No se reconoció la plantilla. Usa la plantilla TICSO o la plantilla CEMACO con ALM, Ubicación, Material, Denominación material, UPC, TEORICO, Valor unitario y DEPARTAMENTO.")
                 return redirect(request.url)
             f.seek(0)
-            df = pd.read_excel(f, header=header_row)
-            df.columns = [str(c).strip() for c in df.columns]
+            df=pd.read_excel(f, header=header_row)
+            df.columns=[str(c).strip() for c in df.columns]
         except Exception:
             flash("No se pudo leer el Excel. Verifica que sea un archivo .xlsx válido.")
             return redirect(request.url)
-        missing=[x for x in REQUIRED if x not in df.columns]
-        if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
-        errors=[]; rows=[]; seen=set()
-        for idx,r in df[REQUIRED].iterrows():
-            ship="" if pd.isna(r["Embarque"]) else str(r["Embarque"]).strip(); code="" if pd.isna(r["Código"]) else str(r["Código"]).strip()
-            if not ship or not code or pd.isna(r["Teórico"]) or (ship,code) in seen: errors.append(idx+2); continue
-            seen.add((ship,code))
-            rows.append((pid,ship,code,str(r["Descripción"]) if pd.notna(r["Descripción"]) else "",str(r["Ubicación"]) if pd.notna(r["Ubicación"]) else "",float(r["Teórico"]),None if pd.isna(r["Precio"]) else float(r["Precio"]),None if pd.isna(r["Costo"]) else float(r["Costo"])))
-        if errors: flash("Hay errores críticos en filas: "+", ".join(map(str,errors[:20]))); return redirect(request.url)
+
+        rows=[]; errors=[]; seen=set()
+        if template=="ticso":
+            missing=[x for x in REQUIRED if x not in df.columns]
+            if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
+            for idx,r in df[REQUIRED].iterrows():
+                ship="" if pd.isna(r["Embarque"]) else str(r["Embarque"]).strip()
+                code="" if pd.isna(r["Código"]) else str(r["Código"]).strip()
+                if not ship or not code or pd.isna(r["Teórico"]) or (ship,code) in seen:
+                    errors.append(idx+header_row+2); continue
+                seen.add((ship,code))
+                rows.append((
+                    pid,ship,code,
+                    str(r["Descripción"]) if pd.notna(r["Descripción"]) else "",
+                    str(r["Ubicación"]) if pd.notna(r["Ubicación"]) else "",
+                    float(r["Teórico"]),
+                    None if pd.isna(r["Precio"]) else float(r["Precio"]),
+                    None if pd.isna(r["Costo"]) else float(r["Costo"]),
+                    "",""
+                ))
+        else:
+            missing=[x for x in ALT_REQUIRED if x not in df.columns]
+            if missing: flash("Faltan columnas: "+", ".join(missing)); return redirect(request.url)
+            for idx,r in df[ALT_REQUIRED].iterrows():
+                alm="" if pd.isna(r["ALM"]) else str(r["ALM"]).strip()
+                code="" if pd.isna(r["Material"]) else str(r["Material"]).strip()
+                location="" if pd.isna(r["Ubicación"]) else str(r["Ubicación"]).strip()
+                if not alm or not code or pd.isna(r["TEORICO"]) or (alm,location,code) in seen:
+                    errors.append(idx+header_row+2); continue
+                seen.add((alm,location,code))
+                upc="" if pd.isna(r["UPC"]) else str(r["UPC"]).strip()
+                dept="" if pd.isna(r["DEPARTAMENTO"]) else str(r["DEPARTAMENTO"]).strip()
+                rows.append((
+                    pid,alm,code,
+                    str(r["Denominación material"]) if pd.notna(r["Denominación material"]) else "",
+                    location,
+                    float(r["TEORICO"]),
+                    None,
+                    None if pd.isna(r["Valor unitario"]) else float(r["Valor unitario"]),
+                    upc,dept
+                ))
+
+        if errors:
+            flash("Hay errores críticos en filas: "+", ".join(map(str,errors[:20])))
+            return redirect(request.url)
+
         c=conn(); c.execute("DELETE FROM items WHERE project_id=?",(pid,))
-        c.executemany("INSERT INTO items(project_id,shipment,code,description,location,theoretical,price,cost) VALUES(?,?,?,?,?,?,?,?)",rows); c.commit(); c.close()
-        flash(f"Excel cargado: {len(rows)} registros"); return redirect(f"/count?project_id={pid}")
-    return page("Cargar Excel",f"""<h1>Cargar Excel</h1><div class='card'><p>Columnas requeridas: {", ".join(REQUIRED)}</p>
-    <form method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.xlsx,.xls' required> <button class='btn blue'>Validar y cargar</button></form></div>""")
+        c.executemany("""INSERT INTO items(project_id,shipment,code,description,location,theoretical,price,cost,upc,department)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",rows)
+        c.commit(); c.close()
+        tipo="Plantilla CEMACO" if template=="cemaco" else "Plantilla TICSO"
+        flash(f"{tipo} cargada correctamente: {len(rows)} registros")
+        return redirect(f"/count?project_id={pid}")
+
+    return page("Cargar Excel",f"""<h1>Cargar Excel</h1>
+    <div class='card'>
+      <p><b>Ahora puedes cargar cualquiera de estos formatos:</b></p>
+      <p>Plantilla TICSO: Embarque, Código, Descripción, Ubicación, Teórico, Precio, Costo</p>
+      <p>Plantilla CEMACO: ALM, Ubicación, Material, Denominación material, UPC, TEORICO, Valor unitario, DEPARTAMENTO</p>
+      <p>En la plantilla CEMACO, <b>ALM se usa como filtro de almacén</b> y <b>Valor unitario se toma como Costo</b>.</p>
+      <form method='post' enctype='multipart/form-data'>
+        <input type='file' name='file' accept='.xlsx,.xls' required>
+        <button class='btn blue'>Validar y cargar</button>
+      </form>
+    </div>""")
 
 @app.route("/count")
 def count():
@@ -187,7 +244,7 @@ def count():
         theo=f"<td>{r['theoretical']}</td>" if u["role"]=="supervisor" else ""
         diff=f"<td id='d{r['id']}'>{'' if r['physical'] is None else r['physical']-r['theoretical']}</td>" if u["role"]=="supervisor" else ""
         disabled="disabled" if r["status"]=="Auditado" and u["role"]!="supervisor" else ""
-        trs+=f"""<tr><td>{r['code']}</td><td>{r['description']}</td><td>{r['location']}</td>{theo}
+        trs+=f"""<tr><td>{r['code']}</td><td>{r['description']}</td><td>{r['upc'] or ''}</td><td>{r['department'] or ''}</td><td>{r['location']}</td>{theo}
         <td><input id='p{r['id']}' type='number' value='{"" if r["physical"] is None else r["physical"]}' {disabled} onfocus='lock({r["id"]},this)' onchange='save({r["id"]})'></td>
         <td><input id='l{r['id']}' type='checkbox' {'checked' if r['location_ok']==1 else ''} {disabled} onchange='save({r["id"]})'></td>{diff}<td id='s{r["id"]}'>{r["status"]}</td></tr>"""
     heads="<th>Teórico</th>" if u["role"]=="supervisor" else ""; dh="<th>Diferencia</th>" if u["role"]=="supervisor" else ""
@@ -203,8 +260,8 @@ def count():
         <button type='button' class='btn green' onclick='manual()'>Agregar código</button>
       </div>
     </div>""" if pid else ""
-    return page("Conteo",f"""<h1>Conteo físico</h1><div class='card'><form method='get'><input type='hidden' name='project_id' value='{pid or ""}'><select name='shipment' onchange='this.form.submit()'>{opts}</select> {manual}</form></div>
-    <div class='card'><table><tr><th>Código</th><th>Descripción</th><th>Ubicación</th>{heads}<th>Físico</th><th>Ubicación correcta</th>{dh}<th>Estado</th></tr>{trs}</table></div>
+    return page("Conteo",f"""<h1>Conteo físico</h1><div class='card'><form method='get'><input type='hidden' name='project_id' value='{pid or ""}'><label><b>Embarque / ALM:</b></label> <select name='shipment' onchange='this.form.submit()'>{opts}</select> {manual}</form></div>
+    <div class='card'><table><tr><th>Código</th><th>Descripción</th><th>UPC</th><th>Departamento</th><th>Ubicación</th>{heads}<th>Físico</th><th>Ubicación correcta</th>{dh}<th>Estado</th></tr>{trs}</table></div>
     <script>
     async function lock(id,e){{let r=await fetch('/api/lock/'+id,{{method:'POST'}});let d=await r.json();if(!d.ok){{e.blur();alert('Bloqueado por '+d.by)}}}}
     async function save(id){{let p=document.getElementById('p'+id).value;if(p==='')return;let l=document.getElementById('l'+id).checked;let r=await fetch('/api/count/'+id,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{physical:p,location_ok:l}})}});let d=await r.json();if(d.ok){{let s=document.getElementById('s'+id);s.innerText=d.status;let x=document.getElementById('d'+id);if(x)x.innerText=d.diff;}}}}
@@ -241,7 +298,7 @@ def save_count(i):
 def manual():
     u=me(); d=request.get_json(); c=conn()
     if c.execute("SELECT 1 FROM items WHERE project_id=? AND shipment=? AND code=?",(d["project_id"],d["shipment"],d["code"])).fetchone(): c.close(); return jsonify(ok=False,message="El código ya existe en la data")
-    c.execute("INSERT INTO items(project_id,shipment,code,description,location,theoretical,physical,status,is_manual,updated_at) VALUES(?,?,?,?,?,0,?,'Sobrante',1,?)",(d["project_id"],d["shipment"],d["code"],d.get("description",""),d.get("location",""),float(d["physical"]),now())); c.commit(); c.close(); return jsonify(ok=True)
+    c.execute("INSERT INTO items(project_id,shipment,code,description,location,theoretical,upc,department,physical,status,is_manual,updated_at) VALUES(?,?,?,?,?,0,'','',?,'Sobrante',1,?)",(d["project_id"],d["shipment"],d["code"],d.get("description",""),d.get("location",""),float(d["physical"]),now())); c.commit(); c.close(); return jsonify(ok=True)
 
 @app.route("/recounts",methods=["GET","POST"])
 def recounts():
