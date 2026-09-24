@@ -191,8 +191,8 @@ def count():
         <td><input id='p{r['id']}' type='number' value='{"" if r["physical"] is None else r["physical"]}' {disabled} onfocus='lock({r["id"]},this)' onchange='save({r["id"]})'></td>
         <td><input id='l{r['id']}' type='checkbox' {'checked' if r['location_ok']==1 else ''} {disabled} onchange='save({r["id"]})'></td>{diff}<td id='s{r["id"]}'>{r["status"]}</td></tr>"""
     heads="<th>Teórico</th>" if u["role"]=="supervisor" else ""; dh="<th>Diferencia</th>" if u["role"]=="supervisor" else ""
-    manual = f"""<button class='btn light' onclick="document.getElementById('m').style.display='block'">+ Ingresar código manual</button>
-    <div id='m' class='card' style='display:none'><div class='row'><input id='mc' placeholder='Código'><input id='md' placeholder='Descripción'><input id='ml' placeholder='Ubicación'><input id='mq' type='number' placeholder='Cantidad'><button class='btn green' onclick='manual()'>Agregar sobrante</button></div></div>""" if u["role"]=="auxiliar" and ship else ""
+    manual = f"""<button type='button' class='btn light' onclick="document.getElementById('m').style.display='block'">+ Ingresar código manual</button>
+    <div id='m' class='card' style='display:none;margin-top:12px'><div class='row'><input id='mc' placeholder='Código'><input id='md' placeholder='Descripción'><input id='ml' placeholder='Ubicación'><input id='mq' type='number' placeholder='Cantidad física'><button type='button' class='btn green' onclick='manual()'>Agregar sobrante</button></div></div>""" if ship else ""
     return page("Conteo",f"""<h1>Conteo físico</h1><div class='card'><form method='get'><input type='hidden' name='project_id' value='{pid or ""}'><select name='shipment' onchange='this.form.submit()'>{opts}</select> {manual}</form></div>
     <div class='card'><table><tr><th>Código</th><th>Descripción</th><th>Ubicación</th>{heads}<th>Físico</th><th>Ubicación correcta</th>{dh}<th>Estado</th></tr>{trs}</table></div>
     <script>
