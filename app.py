@@ -321,7 +321,7 @@ def count():
     opts="".join(f"<option {'selected' if s==ship else ''}>{s}</option>" for s in ships)
     trs=""
     for r in rows:
-        theo=f"<td>{r['theoretical']}</td>" if u["role"]=="supervisor" else ""
+        theo=f"<td>{int(r['theoretical']) if float(r['theoretical']).is_integer() else r['theoretical']}</td>" if u["role"]=="supervisor" else ""
         diff=f"<td id='d{r['id']}'>{'' if r['physical'] is None else r['physical']-r['theoretical']}</td>" if u["role"]=="supervisor" else ""
         disabled="disabled" if r["status"]=="Auditado" and u["role"]!="supervisor" else ""
         trs+=f"""<tr><td>{r['code']}</td><td>{r['description']}</td><td>{r['upc'] or ''}</td><td>{r['department'] or ''}</td><td>{r['location']}</td>{theo}
